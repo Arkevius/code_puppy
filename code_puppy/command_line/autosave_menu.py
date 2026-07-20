@@ -284,7 +284,10 @@ def _render_menu_panel(
         title = metadata.get("title", "")
         msg_count = metadata.get("message_count", "?")
         if title:
-            label = f"{time_str} \u2022 {title}"
+            if session_name.startswith("auto_session_"):
+                label = f"{time_str} \u2022 {title}"
+            else:
+                label = f"{time_str} \u2022 {title} ({session_name})"
         elif session_name.startswith("auto_session_"):
             label = f"{time_str} \u2022 {msg_count} msgs"
         else:
