@@ -830,7 +830,9 @@ class TestRestoreAutosaveTitleAndWorkspace:
         assert "session_abc" not in row_lines[0]
 
     @pytest.mark.asyncio
-    async def test_workspace_header_appears_between_different_workspaces(self, tmp_path):
+    async def test_workspace_header_appears_between_different_workspaces(
+        self, tmp_path
+    ):
         """When sessions from two different workspaces are listed, a workspace header line should appear."""
         # Two sessions from different workspaces
         (tmp_path / "alpha.pkl").write_bytes(b"dummy")
