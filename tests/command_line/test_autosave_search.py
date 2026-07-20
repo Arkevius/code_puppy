@@ -43,26 +43,29 @@ def _make_history(*texts: str) -> List:
 
 
 class TestSearchAlphabet:
-    def test_excludes_e_and_q(self):
-        # ``e`` and ``q`` are handled by their own dual-mode keybindings
-        # in autosave_menu.py (browse-msgs / exit-browse). They must NOT
-        # be in the alphabet or prompt_toolkit will register two handlers
-        # for the same key and the dedicated handler will be shadowed.
+    def test_excludes_a_e_and_q(self):
+        # ``a``, ``e`` and ``q`` are handled by their own dual-mode
+        # keybindings in autosave_menu.py (toggle-all / browse-msgs /
+        # exit-browse). They must NOT be in the alphabet or prompt_toolkit
+        # will register two handlers for the same key and the dedicated
+        # handler will be shadowed.
+        assert "a" not in SEARCH_ALPHABET
         assert "e" not in SEARCH_ALPHABET
         assert "q" not in SEARCH_ALPHABET
         # Uppercase variants too -- prompt_toolkit treats case literally.
+        assert "A" not in SEARCH_ALPHABET
         assert "E" not in SEARCH_ALPHABET
         assert "Q" not in SEARCH_ALPHABET
 
     def test_contains_typical_search_chars(self):
-        for ch in "abcdfghijklmnoprstuvwxyz0123456789_- ":
+        for ch in "bcdfghijklmnoprstuvwxyz0123456789_- ":
             assert ch in SEARCH_ALPHABET
 
 
 class TestAlphabetBindings:
     def test_yields_lowercase_letters_unchanged(self):
         pairs = list(iter_alphabet_bindings())
-        assert ("a", "a") in pairs
+        assert ("b", "b") in pairs
         assert ("z", "z") in pairs
         assert ("0", "0") in pairs
         assert (" ", " ") in pairs
@@ -75,16 +78,19 @@ class TestAlphabetBindings:
         # must include the uppercase variant, but the buffer must stay
         # case-folded (search match is case-insensitive).
         pairs = list(iter_alphabet_bindings())
-        assert ("A", "a") in pairs
+        assert ("B", "b") in pairs
         assert ("Z", "z") in pairs
 
-    def test_no_uppercase_e_or_q(self):
-        # ``E`` and ``Q`` are registered separately by the autosave_menu
-        # dual-mode handlers (alongside ``e`` and ``q``). Yielding them
-        # here would cause prompt_toolkit double-binding.
+    def test_no_uppercase_a_e_or_q(self):
+        # ``A``, ``E`` and ``Q`` are registered separately by the
+        # autosave_menu dual-mode handlers (alongside ``a``, ``e`` and
+        # ``q``). Yielding them here would cause prompt_toolkit
+        # double-binding.
         keys = [key for key, _ in iter_alphabet_bindings()]
+        assert "A" not in keys
         assert "E" not in keys
         assert "Q" not in keys
+        assert "a" not in keys
         assert "e" not in keys
         assert "q" not in keys
 
@@ -331,6 +337,24 @@ class TestEntryMatches:
     def test_matches_message_count_without_loading(self):
         idx = _index_that_never_loads()
         assert entry_matches(self.ENTRY, "42", idx, self.BASE) is True
+
+    def test_matches_title_without_loading(self):
+        idx = _index_that_never_loads()
+        entry = (
+            "autosave_x",
+            {"timestamp": "2026-06-23T08:13:35", "title": "Refactor the auth flow"},
+        )
+        assert entry_matches(entry, "auth flow", idx, self.BASE) is True
+        assert entry_matches(entry, "AUTH", idx, self.BASE) is True
+
+    def test_matches_workspace_without_loading(self):
+        idx = _index_that_never_loads()
+        entry = (
+            "autosave_x",
+            {"timestamp": "2026-06-23T08:13:35", "workspace": "/Users/me/Projects/foo"},
+        )
+        assert entry_matches(entry, "projects/foo", idx, self.BASE) is True
+        assert entry_matches(entry, "FOO", idx, self.BASE) is True
 
     def test_falls_through_to_content_index(self):
         history = _make_history("we talked about kubernetes pods today")

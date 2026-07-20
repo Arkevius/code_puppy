@@ -44,6 +44,8 @@ class SessionMetadata:
     pickle_path: Path
     metadata_path: Path
     auto_saved: bool = False
+    workspace: str = ""
+    title: str = ""
 
     def as_serialisable(self) -> dict[str, Any]:
         return {
@@ -53,6 +55,8 @@ class SessionMetadata:
             "total_tokens": self.total_tokens,
             "file_path": str(self.pickle_path),
             "auto_saved": self.auto_saved,
+            "workspace": self.workspace,
+            "title": self.title,
         }
 
 
@@ -69,6 +73,38 @@ def _extract_pickle_payload(raw: bytes) -> bytes:
     return raw
 
 
+def extract_session_title(history: SessionHistory, max_len: int = 60) -> str:
+    """Derive a short human-readable title from the first user message.
+
+    Duck-typed on pydantic_ai ``ModelMessage`` objects so this stays free of
+    heavy SDK imports (keeps ``session_storage`` cheap to import). Walks the
+    history forward and returns the text of the first ``request`` message that
+    is NOT purely tool-return output -- mirroring the role logic in
+    ``autosave_menu._extract_message_content``. Returns ``""`` when no user
+    text is found (e.g. empty history), so callers can treat empty as "unknown".
+    """
+    for msg in history:
+        parts = getattr(msg, "parts", None) or ()
+        if getattr(msg, "kind", None) != "request":
+            continue
+        # Collect only genuine user input. Deliberately excludes
+        # system-prompt parts (msg[0] is the system message) and
+        # tool-return parts (tool output arrives in a request too).
+        chunks = []
+        for part in parts:
+            if getattr(part, "part_kind", "unknown") != "user-prompt":
+                continue
+            content = getattr(part, "content", None)
+            if isinstance(content, str) and content.strip():
+                chunks.append(content.strip())
+        if chunks:
+            title = " ".join(" ".join(chunks).split())  # collapse whitespace
+            if len(title) > max_len:
+                title = title[: max_len - 1].rstrip() + "…"
+            return title
+    return ""
+
+
 def ensure_directory(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -78,6 +114,26 @@ def build_session_paths(base_dir: Path, session_name: str) -> SessionPaths:
     pickle_path = base_dir / f"{session_name}.pkl"
     metadata_path = base_dir / f"{session_name}_meta.json"
     return SessionPaths(pickle_path=pickle_path, metadata_path=metadata_path)
+
+
+def _read_existing_workspace_title(metadata_path: Path) -> tuple[str, str]:
+    """Return ``(workspace, title)`` from an existing metadata sidecar.
+
+    Missing file, unreadable JSON, or absent keys all degrade to ``("", "")``
+    so a fresh session computes both from scratch. Used by ``save_session`` to
+    keep workspace/title sticky across re-saves.
+    """
+    try:
+        with metadata_path.open("r", encoding="utf-8") as meta_file:
+            data = json.load(meta_file)
+    except Exception:
+        return "", ""
+    workspace = data.get("workspace") or ""
+    title = data.get("title") or ""
+    return (
+        workspace if isinstance(workspace, str) else "",
+        title if isinstance(title, str) else "",
+    )
 
 
 def save_session(
@@ -91,6 +147,23 @@ def save_session(
 ) -> SessionMetadata:
     ensure_directory(base_dir)
     paths = build_session_paths(base_dir, session_name)
+
+    # workspace + title are sticky, creation-time attributes: set once on the
+    # first save, then preserved on every subsequent save. This keeps a session
+    # anchored to where it was created even if it's later resumed from a
+    # different directory.
+    workspace, title = _read_existing_workspace_title(paths.metadata_path)
+    if not title:
+        title = extract_session_title(history)
+    if not workspace:
+        # Deferred local import: config imports session_storage at module
+        # scope, so importing config at module scope here would be circular.
+        try:
+            from code_puppy.config import get_workspace_directory
+
+            workspace = get_workspace_directory()
+        except Exception:
+            workspace = ""
 
     pickle_data = pickle.dumps(history)
     tmp_pickle = paths.pickle_path.with_suffix(".tmp")
@@ -107,6 +180,8 @@ def save_session(
         pickle_path=paths.pickle_path,
         metadata_path=paths.metadata_path,
         auto_saved=auto_saved,
+        workspace=workspace,
+        title=title,
     )
 
     tmp_metadata = paths.metadata_path.with_suffix(".tmp")
@@ -168,6 +243,30 @@ def cleanup_sessions(base_dir: Path, max_sessions: int) -> List[str]:
     return removed_sessions
 
 
+def _arrange_text_entries(entries: list, current_workspace: str) -> list:
+    """Order entries: current workspace first, others by most-recent desc, unknown ("") last."""
+    ws_groups: dict[str, list] = {}
+    for entry in entries:
+        ws = entry[3]  # workspace field
+        ws_groups.setdefault(ws, []).append(entry)
+
+    current = ws_groups.pop(current_workspace, [])
+    unknown = ws_groups.pop("", [])
+
+    # Sort remaining workspaces by their most-recent session timestamp, descending
+    other_ws = sorted(
+        ws_groups,
+        key=lambda ws: (ws_groups[ws][0][1] or ""),
+        reverse=True,
+    )
+
+    result = list(current)
+    for ws in other_ws:
+        result.extend(ws_groups[ws])
+    result.extend(unknown)
+    return result
+
+
 async def restore_autosave_interactively(base_dir: Path) -> None:
     """Prompt the user to load an autosave session from base_dir, if any exist.
 
@@ -199,13 +298,17 @@ async def restore_autosave_interactively(base_dir: Path) -> None:
                 data = json.load(meta_file)
             timestamp = data.get("timestamp")
             message_count = data.get("message_count")
+            workspace = data.get("workspace", "")
+            title = data.get("title", "")
         except Exception:
             timestamp = None
             message_count = None
-        entries.append((name, timestamp, message_count))
+            workspace = ""
+            title = ""
+        entries.append((name, timestamp, message_count, workspace, title))
 
     def sort_key(entry):
-        _, timestamp, _ = entry
+        _, timestamp, _, _, _ = entry
         if timestamp:
             try:
                 return datetime.fromisoformat(timestamp)
@@ -215,24 +318,45 @@ async def restore_autosave_interactively(base_dir: Path) -> None:
 
     entries.sort(key=sort_key, reverse=True)
 
+    try:
+        from code_puppy.config import get_workspace_directory
+
+        current_workspace = get_workspace_directory()
+    except Exception:
+        current_workspace = ""
+    entries = _arrange_text_entries(entries, current_workspace)
+
     PAGE_SIZE = 5
     total = len(entries)
     page = 0
 
     def render_page() -> None:
+        import os
+
         start = page * PAGE_SIZE
         end = min(start + PAGE_SIZE, total)
         page_entries = entries[start:end]
         emit_system_message("Autosave Sessions Available:")
-        for idx, (name, timestamp, message_count) in enumerate(page_entries, start=1):
+        _sentinel = object()
+        prev_workspace: object = _sentinel
+        for idx, (name, timestamp, message_count, workspace, title) in enumerate(
+            page_entries, start=1
+        ):
+            if workspace != prev_workspace:
+                label = (
+                    os.path.basename(workspace) if workspace else "Unknown workspace"
+                )
+                emit_system_message(f"  ── {label} ──")
+                prev_workspace = workspace
             timestamp_display = timestamp or "unknown time"
             message_display = (
                 f"{message_count} messages"
                 if message_count is not None
                 else "unknown size"
             )
+            display_name = title if title else name
             emit_system_message(
-                f"  [{idx}] {name} ({message_display}, saved at {timestamp_display})"
+                f"  [{idx}] {display_name} ({message_display}, saved at {timestamp_display})"
             )
         # If there are more pages, offer next-page; show 'Return to first page' on last page
         if total > PAGE_SIZE:
@@ -291,7 +415,7 @@ async def restore_autosave_interactively(base_dir: Path) -> None:
             continue
 
         # Allow direct typing by exact session name
-        for name, _ts, _mc in entries:
+        for name, _ts, _mc, _ws, _title in entries:
             if name == selection:
                 chosen_name = name
                 break

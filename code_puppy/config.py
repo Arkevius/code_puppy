@@ -1961,6 +1961,23 @@ def reset_all_banner_colors():
         set_banner_color(name, color)
 
 
+_WORKSPACE_DIR = ""
+
+
+def get_workspace_directory() -> str:
+    """Return the workspace directory this process is anchored to.
+
+    The plain working directory (``realpath(os.getcwd())``), git-optional, so
+    non-git project folders group correctly. Captured once on first call and
+    memoized -- prime it at startup (before any tool can ``chdir``) so a
+    mid-session directory change never fragments a session's workspace.
+    """
+    global _WORKSPACE_DIR
+    if not _WORKSPACE_DIR:
+        _WORKSPACE_DIR = os.path.realpath(os.getcwd())
+    return _WORKSPACE_DIR
+
+
 def get_current_session_name() -> str:
     """Return the full filename of the session this process is writing to.
 

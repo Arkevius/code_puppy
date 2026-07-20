@@ -145,6 +145,12 @@ def apply_quick_resume(args) -> bool:
 
 async def main():
     """Main async entry point for Code Puppy CLI."""
+    # Capture the launch directory before anything can chdir, so every session
+    # saved this run is anchored to the workspace it started in.
+    from code_puppy.config import get_workspace_directory
+
+    get_workspace_directory()
+
     parser = argparse.ArgumentParser(description="Code Puppy - A code generation agent")
     parser.add_argument(
         "--version",
@@ -398,6 +404,16 @@ async def main():
         sweep_contexts_to_autosaves()
     except Exception:
         # Sweep failure must never block startup -- it logs internally.
+        pass
+
+    # One-shot backfill of ``title`` and ``workspace`` into legacy session
+    # metadata sidecars. Idempotent via a sentinel; must never block startup.
+    try:
+        from code_puppy.session_backfill import backfill_session_metadata
+
+        backfill_session_metadata()
+    except Exception:
+        # Backfill failure must never block startup -- it logs internally.
         pass
 
     await callbacks.on_startup()

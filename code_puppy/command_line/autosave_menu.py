@@ -32,7 +32,7 @@ from code_puppy.command_line.pagination import (
     get_total_pages,
 )
 from code_puppy.callbacks import on_prompt_toolkit_style
-from code_puppy.config import AUTOSAVE_DIR
+from code_puppy.config import AUTOSAVE_DIR, get_workspace_directory
 from code_puppy.session_storage import list_sessions, load_session
 from code_puppy.tools.command_runner import set_awaiting_user_input
 
@@ -78,6 +78,47 @@ def _get_session_entries(base_dir: Path) -> List[Tuple[str, dict]]:
 
     entries.sort(key=sort_key, reverse=True)
     return entries
+
+
+def _arrange_by_workspace(
+    entries: List[Tuple[str, dict]],
+    current_workspace: str,
+    show_all: bool,
+) -> List[Tuple[str, dict]]:
+    """Arrange a flat, timestamp-desc entry list by workspace.
+
+    Pure and I/O-free. Selection/pagination stay over the returned flat
+    list; grouping is purely a render-time concern (see
+    :func:`_render_menu_panel`).
+
+    ``show_all=False``: keep only entries in ``current_workspace``. If that
+    is empty (fresh workspace), fall back to ALL entries so the picker is
+    never blank.
+
+    ``show_all=True``: current_workspace group first, then other workspaces
+    ordered by their most-recent session (desc), then the "" (unknown) group
+    LAST. Order within each group is preserved (input is already
+    timestamp-desc).
+    """
+    if not show_all:
+        current = [e for e in entries if e[1].get("workspace", "") == current_workspace]
+        return current if current else list(entries)
+
+    # Bucket by workspace, preserving timestamp-desc order within each bucket.
+    # dict preserves first-seen order == most-recent-session order.
+    buckets: dict = {}
+    for entry in entries:
+        buckets.setdefault(entry[1].get("workspace", ""), []).append(entry)
+
+    ordered_keys = [k for k in buckets if k not in ("", current_workspace)]
+    result: List[Tuple[str, dict]] = []
+    if current_workspace in buckets:
+        result.extend(buckets[current_workspace])
+    for key in ordered_keys:
+        result.extend(buckets[key])
+    if "" in buckets:
+        result.extend(buckets[""])
+    return result
 
 
 def _extract_last_user_message(history: list) -> str:
@@ -172,6 +213,7 @@ def _render_menu_panel(
     in_search_mode: bool = False,
     search_buffer: str = "",
     status_line: Optional[Tuple[str, str]] = None,
+    show_workspace_headers: bool = False,
 ) -> List:
     """Render the left menu panel with pagination.
 
@@ -215,9 +257,19 @@ def _render_menu_panel(
         lines.append(("", "Cancel"))
         return lines
 
+    # Sentinel so the first row on the page always emits its group header.
+    prev_workspace = object()
     for i in range(start_idx, end_idx):
         session_name, metadata = entries[i]
         is_selected = i == selected_idx
+
+        # Workspace group separator (cosmetic; not selectable, not paginated).
+        workspace = metadata.get("workspace", "")
+        if show_workspace_headers and workspace != prev_workspace:
+            ws_label = Path(workspace).name if workspace else "Unknown workspace"
+            lines.append(("class:tui.muted", f" ── {ws_label} ──"))
+            lines.append(("", "\n"))
+        prev_workspace = workspace
 
         # Format timestamp
         timestamp = metadata.get("timestamp", "unknown")
@@ -229,8 +281,11 @@ def _render_menu_panel(
 
         # Format message count. auto_session_* names are opaque noise — hide them.
         # User-named sessions keep the parenthetical so they stay distinguishable.
+        title = metadata.get("title", "")
         msg_count = metadata.get("message_count", "?")
-        if session_name.startswith("auto_session_"):
+        if title:
+            label = f"{time_str} \u2022 {title}"
+        elif session_name.startswith("auto_session_"):
             label = f"{time_str} \u2022 {msg_count} msgs"
         else:
             label = f"{time_str} \u2022 {msg_count} msgs ({session_name})"
@@ -259,6 +314,8 @@ def _render_menu_panel(
         lines.append(("", "Browse msgs\n"))
         lines.append(("class:tui.help-key", "  /   "))
         lines.append(("", "Search content\n"))
+        lines.append(("class:tui.help-key", "  a   "))
+        lines.append(("", "Toggle all workspaces\n"))
     lines.append(("class:tui.help-key", "  Enter  "))
     lines.append(("", "Load\n"))
     lines.append(("class:tui.help-key", "  Ctrl+C "))
@@ -381,6 +438,14 @@ def _render_preview_panel(base_dir: Path, entry: Optional[Tuple[str, dict]]) -> 
     # Show metadata
     lines.append(("class:tui.label", "  Session: "))
     lines.append(("", session_name))
+    lines.append(("", "\n"))
+
+    workspace = metadata.get("workspace", "")
+    lines.append(("class:tui.muted", f"  Workspace: {workspace or 'Unknown'}"))
+    lines.append(("", "\n"))
+
+    title = metadata.get("title", "")
+    lines.append(("class:tui.muted", f"  Title: {title}"))
     lines.append(("", "\n"))
 
     timestamp = metadata.get("timestamp", "unknown")
@@ -555,11 +620,17 @@ async def interactive_autosave_picker() -> Optional[str]:
     message_idx = [0]  # Current message index (0 = most recent)
     cached_history = [None]  # Cached history for current session in browse mode
 
+    # Workspace grouping state
+    current_workspace = get_workspace_directory()
+    show_all = [False]  # Show every workspace (grouped) vs. current only?
+
     # Search/filter state (mirrors set_menu.py's `/`-search UX)
     search_text = [""]  # Committed filter (drives visible_entries)
     in_search_mode = [False]  # Currently typing into the search buffer?
     search_buffer = [""]  # Live keystrokes before Enter commits them
-    visible_entries: List[List[Tuple[str, dict]]] = [list(entries)]
+    visible_entries: List[List[Tuple[str, dict]]] = [
+        _arrange_by_workspace(entries, current_workspace, show_all[0])
+    ]
     content_index = SessionContentIndex()  # Lazy content cache for THIS picker
     is_filtering = [False]  # True while the Enter-handler is doing the work
     total_to_index = len(entries)  # Denominator for the prewarm progress hint
@@ -570,6 +641,16 @@ async def interactive_autosave_picker() -> Optional[str]:
             return visible[selected_idx[0]]
         return None
 
+    def _arranged_base() -> List[Tuple[str, dict]]:
+        """The workspace-arranged list the current filter runs over.
+
+        Search and grouping compose: when ``show_all`` is on (search always
+        forces it on) this is every entry grouped by workspace; otherwise it
+        is the current-workspace subset. Safe to call off-thread -- reads only
+        immutable ``entries`` and the atomic ``show_all`` cell.
+        """
+        return _arrange_by_workspace(entries, current_workspace, show_all[0])
+
     def _filter_entries(needle: str) -> List[Tuple[str, dict]]:
         """Pure filter: needle in, filtered list out. Safe to run off-thread.
 
@@ -578,9 +659,10 @@ async def interactive_autosave_picker() -> Optional[str]:
         and ``content_index`` is protected by its own internal lock, so
         this is safe to invoke from an ``asyncio.to_thread`` worker.
         """
+        base = _arranged_base()
         if not needle:
-            return list(entries)
-        return [e for e in entries if entry_matches(e, needle, content_index, base_dir)]
+            return base
+        return [e for e in base if entry_matches(e, needle, content_index, base_dir)]
 
     def _apply_filter_result(filtered: List[Tuple[str, dict]]) -> None:
         """Apply a filter result to picker state. Must run on the main thread."""
@@ -639,6 +721,7 @@ async def interactive_autosave_picker() -> Optional[str]:
             in_search_mode=in_search_mode[0],
             search_buffer=search_buffer[0],
             status_line=_compute_status_line(),
+            show_workspace_headers=show_all[0],
         )
         # Show message browser if in browse mode, otherwise show preview
         if browse_mode[0] and cached_history[0] is not None:
@@ -826,6 +909,33 @@ async def interactive_autosave_picker() -> Optional[str]:
             return
         in_search_mode[0] = True
         search_buffer[0] = ""
+        # Search must span every workspace, not just the current one -- force
+        # show_all on and rebuild the arranged base so no match is hidden.
+        if not show_all[0]:
+            show_all[0] = True
+            # Reapply any committed filter over the newly-scoped base so the
+            # "Filter: '...'" indicator stays consistent with the list.
+            _apply_filter_result(_filter_entries(search_text[0]))
+            selected_idx[0] = 0
+            current_page[0] = 0
+        update_display()
+
+    @kb.add("a")
+    @kb.add("A")
+    def _(event):
+        """Toggle all-workspace view, or feed the search buffer."""
+        if in_search_mode[0]:
+            search_buffer[0] += "a"
+            update_display()
+            return
+        if browse_mode[0]:
+            return
+        show_all[0] = not show_all[0]
+        # Reapply any committed filter over the newly-scoped base so the
+        # "Filter: '...'" indicator stays consistent with the list.
+        _apply_filter_result(_filter_entries(search_text[0]))
+        selected_idx[0] = 0
+        current_page[0] = 0
         update_display()
 
     @kb.add("backspace")

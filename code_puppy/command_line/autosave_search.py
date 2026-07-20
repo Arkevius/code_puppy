@@ -24,13 +24,14 @@ from typing import Callable, Dict, Iterator, Optional, Tuple
 from code_puppy.session_storage import load_session
 
 # Alphabet bound to the search buffer while ``in_search_mode`` is True.
-# Lowercase ASCII letters (except ``e`` and ``q``), digits, underscore,
-# hyphen, and space. ``e`` and ``q`` are deliberately excluded because
-# autosave_menu.py already binds them to nav actions (browse-msgs and
-# exit-browse respectively); those existing handlers are dual-mode --
-# they append to the search buffer when ``in_search_mode`` is True and
-# fire their nav action otherwise. Same trick set_menu uses for ``r``.
-SEARCH_ALPHABET = "abcdfghijklmnoprstuvwxyz0123456789_- "
+# Lowercase ASCII letters (except ``a``, ``e`` and ``q``), digits,
+# underscore, hyphen, and space. ``a``, ``e`` and ``q`` are deliberately
+# excluded because autosave_menu.py already binds them to nav actions
+# (toggle-all-workspaces, browse-msgs and exit-browse respectively); those
+# existing handlers are dual-mode -- they append to the search buffer when
+# ``in_search_mode`` is True and fire their nav action otherwise. Same
+# trick set_menu uses for ``r``.
+SEARCH_ALPHABET = "bcdfghijklmnoprstuvwxyz0123456789_- "
 
 
 def iter_alphabet_bindings() -> Iterator[Tuple[str, str]]:
@@ -165,7 +166,7 @@ def entry_matches(
 
     Empty needle matches everything (the picker shows the full list).
     Cheap metadata checks (session name, formatted timestamp, message
-    count) run first; the full session content is only loaded via
+    count, title, workspace) run first; the full session content is only loaded via
     ``index`` if the cheap checks miss. Typing ``2026-06`` therefore
     never triggers a single pickle read.
     """
@@ -179,6 +180,10 @@ def entry_matches(
     if needle_lower in _formatted_timestamp(metadata).lower():
         return True
     if needle_lower in str(metadata.get("message_count", "")).lower():
+        return True
+    if needle_lower in str(metadata.get("title", "")).lower():
+        return True
+    if needle_lower in str(metadata.get("workspace", "")).lower():
         return True
 
     return needle_lower in index.lookup(session_name, base_dir)

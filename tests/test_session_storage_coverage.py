@@ -77,6 +77,10 @@ def mock_interactive_imports(
                 "code_puppy.config.pin_current_session_name",
                 MagicMock(),
             ),
+            patch(
+                "code_puppy.config.get_workspace_directory",
+                return_value="",
+            ),
         ]
 
         if mock_load_session is not None:
@@ -790,3 +794,121 @@ class TestRestoreAutosaveInvalidPageSelection:
 
         # Should have warned about invalid selection
         assert any("Invalid" in w or "invalid" in w.lower() for w in warnings)
+
+
+class TestRestoreAutosaveTitleAndWorkspace:
+    """Tests for title display and workspace grouping in the text picker."""
+
+    @pytest.mark.asyncio
+    async def test_session_with_title_shows_title_in_row(self, tmp_path):
+        """When a session has a non-empty title, the row should display the title, not the name."""
+        (tmp_path / "session_abc.pkl").write_bytes(b"dummy")
+        (tmp_path / "session_abc_meta.json").write_text(
+            json.dumps(
+                {
+                    "timestamp": "2024-06-01T10:00:00",
+                    "message_count": 3,
+                    "workspace": "",
+                    "title": "Fix the login bug",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        displayed = []
+
+        async with mock_interactive_imports(
+            mock_input_return="", capture_system=displayed
+        ):
+            await restore_autosave_interactively(tmp_path)
+
+        combined = " ".join(displayed)
+        assert "Fix the login bug" in combined
+        # The raw session name should NOT appear in the selection rows
+        row_lines = [m for m in displayed if "[1]" in m]
+        assert row_lines, "Expected at least one selection row"
+        assert "session_abc" not in row_lines[0]
+
+    @pytest.mark.asyncio
+    async def test_workspace_header_appears_between_different_workspaces(self, tmp_path):
+        """When sessions from two different workspaces are listed, a workspace header line should appear."""
+        # Two sessions from different workspaces
+        (tmp_path / "alpha.pkl").write_bytes(b"dummy")
+        (tmp_path / "alpha_meta.json").write_text(
+            json.dumps(
+                {
+                    "timestamp": "2024-06-02T10:00:00",
+                    "message_count": 1,
+                    "workspace": "/home/user/project-a",
+                    "title": "",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (tmp_path / "beta.pkl").write_bytes(b"dummy")
+        (tmp_path / "beta_meta.json").write_text(
+            json.dumps(
+                {
+                    "timestamp": "2024-06-01T10:00:00",
+                    "message_count": 1,
+                    "workspace": "/home/user/project-b",
+                    "title": "",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        displayed = []
+
+        async with mock_interactive_imports(
+            mock_input_return="", capture_system=displayed
+        ):
+            await restore_autosave_interactively(tmp_path)
+
+        # At least one header line with the box-drawing separator should appear
+        header_lines = [m for m in displayed if "──" in m]
+        assert len(header_lines) >= 2, f"Expected workspace headers, got: {displayed}"
+
+
+class TestArrangeTextEntries:
+    """Unit tests for the _arrange_text_entries helper."""
+
+    def test_current_workspace_first(self):
+        from code_puppy.session_storage import _arrange_text_entries
+
+        entries = [
+            ("a", "2024-03-01T00:00:00", 1, "/ws/other", ""),
+            ("b", "2024-02-01T00:00:00", 1, "/ws/current", ""),
+            ("c", "2024-01-01T00:00:00", 1, "", ""),
+        ]
+        result = _arrange_text_entries(entries, "/ws/current")
+        # current workspace entry should be first
+        assert result[0][0] == "b"
+
+    def test_unknown_workspace_last(self):
+        from code_puppy.session_storage import _arrange_text_entries
+
+        entries = [
+            ("a", "2024-03-01T00:00:00", 1, "/ws/other", ""),
+            ("b", "2024-01-01T00:00:00", 1, "", ""),
+        ]
+        result = _arrange_text_entries(entries, "/ws/current")
+        # unknown ("") workspace should be last
+        assert result[-1][0] == "b"
+
+    def test_within_group_timestamp_order_preserved(self):
+        from code_puppy.session_storage import _arrange_text_entries
+
+        # Two entries in the same workspace, already sorted newest-first
+        entries = [
+            ("newer", "2024-06-01T00:00:00", 1, "/ws/same", ""),
+            ("older", "2024-01-01T00:00:00", 1, "/ws/same", ""),
+        ]
+        result = _arrange_text_entries(entries, "/ws/current")
+        assert result[0][0] == "newer"
+        assert result[1][0] == "older"
+
+    def test_empty_entries(self):
+        from code_puppy.session_storage import _arrange_text_entries
+
+        assert _arrange_text_entries([], "/ws/current") == []

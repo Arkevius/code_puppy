@@ -12,6 +12,7 @@ import pytest
 
 from code_puppy.command_line.autosave_menu import (
     PAGE_SIZE,
+    _arrange_by_workspace,
     _extract_last_user_message,
     _extract_message_content,
     _get_session_entries,
@@ -1350,3 +1351,170 @@ class TestSessionEntrySorting:
             "auto_session_20260101_120000",
             "auto_session_20251201_120000",
         ]
+
+
+def _ws_entry(name, workspace, ts, title="", msg_count=1):
+    md = {"timestamp": ts, "workspace": workspace, "message_count": msg_count}
+    if title:
+        md["title"] = title
+    return (name, md)
+
+
+class TestArrangeByWorkspace:
+    """Test the pure _arrange_by_workspace helper."""
+
+    def test_show_all_false_keeps_only_current_workspace(self):
+        entries = [
+            _ws_entry("s1", "/home/proj", "2026-01-03T00:00:00"),
+            _ws_entry("s2", "/home/other", "2026-01-02T00:00:00"),
+            _ws_entry("s3", "/home/proj", "2026-01-01T00:00:00"),
+        ]
+        result = _arrange_by_workspace(entries, "/home/proj", show_all=False)
+        assert [e[0] for e in result] == ["s1", "s3"]
+
+    def test_show_all_false_empty_current_falls_back_to_all(self):
+        entries = [
+            _ws_entry("s1", "/home/other", "2026-01-02T00:00:00"),
+            _ws_entry("s2", "/home/another", "2026-01-01T00:00:00"),
+        ]
+        result = _arrange_by_workspace(entries, "/home/nowhere", show_all=False)
+        assert [e[0] for e in result] == ["s1", "s2"]
+
+    def test_show_all_true_current_first_unknown_last(self):
+        entries = [
+            _ws_entry("unknown1", "", "2026-01-05T00:00:00"),
+            _ws_entry("other1", "/home/other", "2026-01-04T00:00:00"),
+            _ws_entry("cur1", "/home/proj", "2026-01-03T00:00:00"),
+            _ws_entry("cur2", "/home/proj", "2026-01-02T00:00:00"),
+        ]
+        result = _arrange_by_workspace(entries, "/home/proj", show_all=True)
+        # current workspace group first, unknown ("") group last.
+        assert [e[0] for e in result] == ["cur1", "cur2", "other1", "unknown1"]
+
+    def test_show_all_true_other_workspaces_by_most_recent(self):
+        entries = [
+            _ws_entry("b1", "/home/b", "2026-01-05T00:00:00"),  # b most recent
+            _ws_entry("cur1", "/home/proj", "2026-01-04T00:00:00"),
+            _ws_entry("a1", "/home/a", "2026-01-03T00:00:00"),
+            _ws_entry("b2", "/home/b", "2026-01-01T00:00:00"),
+        ]
+        result = _arrange_by_workspace(entries, "/home/proj", show_all=True)
+        # current first, then /home/b (most recent session), then /home/a.
+        assert [e[0] for e in result] == ["cur1", "b1", "b2", "a1"]
+
+    def test_show_all_true_within_group_time_desc_preserved(self):
+        # Input is already timestamp-desc; grouping must preserve that order.
+        entries = [
+            _ws_entry("cur_new", "/home/proj", "2026-01-09T00:00:00"),
+            _ws_entry("cur_mid", "/home/proj", "2026-01-05T00:00:00"),
+            _ws_entry("cur_old", "/home/proj", "2026-01-01T00:00:00"),
+        ]
+        result = _arrange_by_workspace(entries, "/home/proj", show_all=True)
+        assert [e[0] for e in result] == ["cur_new", "cur_mid", "cur_old"]
+
+    def test_missing_workspace_key_treated_as_unknown(self):
+        entries = [
+            ("legacy", {"timestamp": "2026-01-02T00:00:00"}),  # no workspace key
+            _ws_entry("cur1", "/home/proj", "2026-01-01T00:00:00"),
+        ]
+        result = _arrange_by_workspace(entries, "/home/proj", show_all=True)
+        # legacy (unknown workspace) sorts last.
+        assert [e[0] for e in result] == ["cur1", "legacy"]
+
+
+class TestRenderMenuPanelWorkspace:
+    """Test workspace headers and title rendering in _render_menu_panel."""
+
+    def test_emits_workspace_header_when_workspaces_differ(self):
+        entries = [
+            _ws_entry("s1", "/home/proj", "2026-01-02T00:00:00"),
+            _ws_entry("s2", "/home/other", "2026-01-01T00:00:00"),
+        ]
+        result = _render_menu_panel(entries, 0, 0, show_workspace_headers=True)
+        lines_str = str(result)
+        # basenames of each workspace appear as headers.
+        assert "proj" in lines_str
+        assert "other" in lines_str
+        assert "──" in lines_str
+
+    def test_no_headers_when_flag_off(self):
+        entries = [
+            _ws_entry("s1", "/home/proj", "2026-01-02T00:00:00"),
+            _ws_entry("s2", "/home/other", "2026-01-01T00:00:00"),
+        ]
+        result = _render_menu_panel(entries, 0, 0, show_workspace_headers=False)
+        lines_str = str(result)
+        assert "──" not in lines_str
+
+    def test_unknown_workspace_label_for_empty(self):
+        entries = [_ws_entry("s1", "", "2026-01-02T00:00:00")]
+        result = _render_menu_panel(entries, 0, 0, show_workspace_headers=True)
+        lines_str = str(result)
+        assert "Unknown workspace" in lines_str
+
+    def test_shows_title_in_row_when_present(self):
+        entries = [
+            _ws_entry(
+                "auto_session_x",
+                "/home/proj",
+                "2026-01-02T12:30:00",
+                title="Fix the login bug",
+            )
+        ]
+        result = _render_menu_panel(entries, 0, 0)
+        lines_str = str(result)
+        assert "Fix the login bug" in lines_str
+        # Title replaces the msg-count label in the row (footer hint aside).
+        assert "1 msgs" not in lines_str
+
+    def test_falls_back_to_msg_count_when_title_empty(self):
+        entries = [
+            _ws_entry(
+                "auto_session_x", "/home/proj", "2026-01-02T12:30:00", msg_count=7
+            )
+        ]
+        result = _render_menu_panel(entries, 0, 0)
+        lines_str = str(result)
+        assert "7 msgs" in lines_str
+
+    def test_toggle_all_workspaces_hint_shown(self):
+        entries = [_ws_entry("s1", "/home/proj", "2026-01-02T00:00:00")]
+        result = _render_menu_panel(entries, 0, 0, browse_mode=False)
+        lines_str = str(result)
+        assert "Toggle all workspaces" in lines_str
+
+
+class TestSearchSurvivesWorkspaceToggle:
+    """A committed filter must persist when show_all is toggled.
+
+    Mirrors the picker's ``_filter_entries`` composition (arrange base, then
+    ``entry_matches`` over it) so the toggle path can't silently drop a filter.
+    """
+
+    def test_committed_filter_survives_toggle_to_show_all(self):
+        from code_puppy.command_line.autosave_search import (
+            SessionContentIndex,
+            entry_matches,
+        )
+
+        idx = SessionContentIndex(loader=lambda n, b: [])  # never matches content
+        base_dir = Path("/tmp")
+        needle = "login"
+        entries = [
+            _ws_entry("cur1", "/home/proj", "2026-01-04T00:00:00", title="login bug"),
+            _ws_entry("cur2", "/home/proj", "2026-01-03T00:00:00", title="css tweak"),
+            _ws_entry("oth1", "/home/other", "2026-01-02T00:00:00", title="login page"),
+        ]
+
+        def filtered(show_all):
+            base = _arrange_by_workspace(entries, "/home/proj", show_all)
+            return [e for e in base if entry_matches(e, needle, idx, base_dir)]
+
+        # show_all=False: only current-workspace matches.
+        assert [e[0] for e in filtered(False)] == ["cur1"]
+
+        # Toggle to show_all=True: filter still applied (NOT the full base),
+        # now spanning both workspaces.
+        toggled = filtered(True)
+        assert [e[0] for e in toggled] == ["cur1", "oth1"]
+        assert len(toggled) < len(_arrange_by_workspace(entries, "/home/proj", True))
